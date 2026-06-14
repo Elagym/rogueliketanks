@@ -1,0 +1,28 @@
+{
+  "name": "roguelike-tanks",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Browser-based top-down roguelike tank combat game",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "seedrandom": "^3.0.5",
+    "three": "^0.160.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/seedrandom": "^3.0.8",
+    "@types/three": "^0.160.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
