@@ -2,15 +2,15 @@ import { useEffect, useRef } from 'react';
 import type { HudSnapshot, WeaponType } from '../game/types';
 
 const WEAPON_DESC: Record<WeaponType, string> = {
-  rapid: 'Rapid-Fire Cannon: 5 dmg, 5 shots/s, overheats',
-  longrange: 'Long-Range Cannon: 25 dmg, 2s reload',
-  explosive: 'Explosive Launcher: 40 dmg + 20 splash, 3s reload',
+  rapid: 'Field Gun — quick lob, short charge & reload, modest blast',
+  longrange: 'Siege Cannon — balanced long-range artillery',
+  explosive: 'Heavy Artillery — longest range, huge blast, slow reload',
 };
 
 const WEAPON_SHORT: Record<WeaponType, string> = {
-  rapid: 'RAPID',
-  longrange: 'LONG',
-  explosive: 'EXPLO',
+  rapid: 'FIELD',
+  longrange: 'SIEGE',
+  explosive: 'HEAVY',
 };
 
 const MINIMAP_SIZE = 120;
@@ -34,43 +34,46 @@ export function HUD({ snap }: { snap: HudSnapshot }) {
         </div>
         <div className="weapons">
           {snap.weapons.map((w, i) => {
-            const ready = w.cooldownRemaining <= 0 && !w.overheated;
+            const isActive = i === snap.selectedWeapon;
+            const charging = isActive && snap.charging;
+            const ready = w.cooldownRemaining <= 0 && !charging;
             const cdPct = w.reloadTime > 0 ? (1 - w.cooldownRemaining / w.reloadTime) * 100 : 100;
-            const heatPct = w.heat * 100;
+            const fillPct = charging ? snap.chargeProgress * 100 : Math.min(100, cdPct);
+            const label = charging ? 'AIMING' : ready ? 'READY' : 'RELOAD';
+            const labelColor = charging ? '#ffd060' : ready ? '#0f0' : '#f80';
             return (
-              <div key={i} className={`weapon-box ${i === snap.selectedWeapon ? 'active' : ''}`}>
+              <div key={i} className={`weapon-box ${isActive ? 'active' : ''}`}>
                 <div>
                   {i + 1} {WEAPON_SHORT[w.type]}
                 </div>
-                <div style={{ color: ready ? '#0f0' : '#f80', fontSize: 9 }}>
-                  {w.overheated ? 'HOT' : ready ? 'READY' : '...'}
-                </div>
+                <div style={{ color: labelColor, fontSize: 9 }}>{label}</div>
                 <div className="cooldown">
-                  <div className="cd" style={{ width: `${Math.min(100, cdPct)}%` }} />
+                  <div
+                    className={`cd ${charging ? 'hot' : ''}`}
+                    style={{ width: `${fillPct}%`, background: charging ? '#ffd060' : '#0f0' }}
+                  />
                 </div>
-                {w.type === 'rapid' && (
-                  <div className="cooldown">
-                    <div className={`cd ${w.overheated ? 'hot' : ''}`} style={{ width: `${heatPct}%`, background: w.overheated ? '#f00' : '#fa0' }} />
-                  </div>
-                )}
               </div>
             );
           })}
         </div>
       </div>
 
-      {/* Top-center: distance + accuracy */}
+      {/* Top-center: aim range + nearest enemy */}
       <div className="hud-tc">
-        {snap.nearestEnemyDist !== null ? (
-          <>
-            <div className="dist-big">{Math.round(snap.nearestEnemyDist)}px</div>
-            <div className="stat">
-              {selected.name.split(' ')[0]} ACC: {Math.round((snap.currentAccuracy ?? 0) * 100)}%
-            </div>
-          </>
-        ) : (
-          <div className="stat">NO CONTACT</div>
-        )}
+        <div className="dist-big" style={{ color: snap.aimInRange ? '#00ff66' : '#ff5050' }}>
+          {Math.round(snap.aimDistance)}px {snap.aimInRange ? '◎' : '✕'}
+        </div>
+        <div className="stat">
+          {snap.charging
+            ? `AIMING ${Math.round(snap.chargeProgress * 100)}%`
+            : `RANGE ${snap.weaponMinRange}–${snap.weaponRange}px · PREC ${Math.round((snap.currentAccuracy ?? 1) * 100)}%`}
+        </div>
+        <div className="stat" style={{ marginTop: 2 }}>
+          {snap.nearestEnemyDist !== null
+            ? `NEAREST ${Math.round(snap.nearestEnemyDist)}px`
+            : 'NO CONTACT'}
+        </div>
       </div>
 
       {/* Top-right: minimap + fps */}

@@ -14,21 +14,30 @@ Play it live: **https://elagym.github.io/rogueliketanks/** (after deploying — 
 
 | Action | Input |
 | --- | --- |
-| Move | `W` `A` `S` `D` (momentum-based) |
-| Aim turret | Mouse |
-| Fire | Left click (hold for rapid-fire) |
+| Move | `W` `A` `S` `D` / arrow keys (momentum-based) |
+| Aim | Mouse — a reticle shows exactly where the shell will land |
+| Fire | Left click / hold (wind-up → shell arcs → reload) |
 | Switch weapon | `1` / `2` / `3` or mouse wheel |
 | Pause | `Esc` |
 
 ## Gameplay
 
-- **Three weapons:** Rapid-Fire Cannon (fast, overheats), Long-Range Cannon
-  (balanced), Explosive Launcher (splash damage).
-- **Distance ballistics:** accuracy falls off with range —
-  `accuracy = baseAccuracy × (1 − (dist / maxRange)²)`, floored at each weapon's
-  long-range accuracy. The HUD shows your hit chance against the nearest enemy.
+This is **artillery combat on a large battlefield**. Tanks are deliberate and
+slow; engagements are won by positioning and timing, not twitch aim.
+
+- **Aim → charge → lob → reload.** Place the reticle, hold fire to wind up
+  (charge), and the gun lobs an **arcing shell** that travels to the aim point
+  and explodes. Then it reloads. Where you put the reticle is where the shell
+  lands (within a scatter that shrinks with the accuracy upgrade) — so aiming is
+  WYSIWYG, not a hidden hit/miss roll.
+- **Three artillery pieces:** Field Gun (quick, short range/charge), Siege Cannon
+  (balanced long range), Heavy Artillery (longest range, huge blast, slow). The
+  HUD shows range, in/out-of-range, charge %, and reload.
+- **Telegraphed incoming fire.** Enemy shells project a **landing marker** on the
+  ground during their wind-up and flight, giving you time to drive clear.
 - **Four enemy types:** Scout, Standard, Heavy and Sniper, each with distinct
-  HP, speed, weapons and AI (pathfinding, evasion, sniper kiting, heavy charges).
+  HP, speed, weapons and AI (long-range duelling, standoff kiting, sniper
+  distance-keeping, heavy charges).
 - **Difficulty scaling:** enemies grow stronger every 3 kills, accelerating past
   12 kills.
 - **Fog of war:** 80px vision radius; explored terrain is remembered on the

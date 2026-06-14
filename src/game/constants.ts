@@ -1,30 +1,34 @@
 // Tunable game constants. World units == pixels (256x256 world).
 
-export const WORLD_SIZE = 256; // pixels
+export const WORLD_SIZE = 768; // pixels (much larger battlefield)
 export const TILE_SIZE = 16; // pixels
-export const GRID = WORLD_SIZE / TILE_SIZE; // 16x16 tiles
+export const GRID = WORLD_SIZE / TILE_SIZE; // 48x48 tiles
 
-// Player movement
-export const PLAYER_BASE_SPEED = 100; // px/s
-export const ACCEL_TIME = 0.25; // seconds to reach full speed
-export const DECEL_TIME = 0.35; // seconds to stop
+// Camera: zoomed-out tactical view so long-range shells are visible.
+export const VIEW_HEIGHT = 360; // world px visible vertically
+
+// Player movement (slower, deliberate pacing)
+export const PLAYER_BASE_SPEED = 62; // px/s
+export const ACCEL_TIME = 0.35; // seconds to reach full speed
+export const DECEL_TIME = 0.45; // seconds to stop
 export const PLAYER_MAX_HP = 100;
-export const PLAYER_VISION = 80; // px radius
-export const TANK_RADIUS = 7; // collision radius (px)
+export const PLAYER_VISION = 175; // px radius
+export const TANK_RADIUS = 8; // collision radius (px)
 
-// Turret
-export const TURRET_CHASSIS_LIMIT = (120 * Math.PI) / 180; // ±120° from body forward
+// Turret rotates freely (artillery — aiming accuracy comes from the reticle,
+// not the turret angle, so no chassis constraint is needed).
+export const TURRET_CHASSIS_LIMIT = Math.PI; // 360° free
 
 // Ballistics
-export const MAX_RANGE = 200; // px reference for accuracy falloff
+export const MAX_RANGE = 360; // px reference (longest weapon range)
 
 // Enemies
 export const MAX_ENEMIES = 6;
-export const SPAWN_INTERVAL_MIN = 8; // seconds
-export const SPAWN_INTERVAL_MAX = 12;
-export const ENEMY_AWARENESS = 120; // px LOS detection
-export const ENEMY_ENGAGE_RANGE = 180; // px to start firing
-export const FIRST_SPAWN_DELAY = 3; // seconds
+export const SPAWN_INTERVAL_MIN = 9; // seconds
+export const SPAWN_INTERVAL_MAX = 14;
+export const ENEMY_AWARENESS = 300; // px LOS detection (long-range artillery duel)
+export const ENEMY_ENGAGE_RANGE = 320; // px to start firing
+export const FIRST_SPAWN_DELAY = 4; // seconds
 
 // Difficulty scaling
 export const SCALE_PER_KILLS = 3;

@@ -12,10 +12,10 @@ interface EnemyTemplate {
 }
 
 export const ENEMY_TEMPLATES: Record<EnemyType, EnemyTemplate> = {
-  scout: { hp: 30, speed: 120, damage: 8, accuracy: 0.7, fireInterval: 0.9, fireDelay: 0, minAccuracy: 0.5 },
-  standard: { hp: 60, speed: 80, damage: 20, accuracy: 0.75, fireInterval: 1.6, fireDelay: 0.5, minAccuracy: 0.55 },
-  heavy: { hp: 100, speed: 50, damage: 35, accuracy: 0.8, fireInterval: 2.2, fireDelay: 1, minAccuracy: 0.6 },
-  sniper: { hp: 40, speed: 75, damage: 30, accuracy: 0.9, fireInterval: 2.8, fireDelay: 1.5, minAccuracy: 0.7 },
+  scout: { hp: 30, speed: 78, damage: 10, accuracy: 0.6, fireInterval: 2.2, fireDelay: 0.4, minAccuracy: 0.5 },
+  standard: { hp: 60, speed: 52, damage: 22, accuracy: 0.7, fireInterval: 3.0, fireDelay: 0.8, minAccuracy: 0.55 },
+  heavy: { hp: 110, speed: 34, damage: 38, accuracy: 0.78, fireInterval: 4.0, fireDelay: 1.2, minAccuracy: 0.6 },
+  sniper: { hp: 42, speed: 48, damage: 34, accuracy: 0.9, fireInterval: 4.2, fireDelay: 1.6, minAccuracy: 0.7 },
 };
 
 /** Difficulty scaling factor applied to enemy stats based on kill count. */
@@ -55,18 +55,26 @@ export function pickEnemyType(kills: number, roll: number, sniperRoll: number, h
 }
 
 function makeEnemyWeapon(t: EnemyType, tpl: EnemyTemplate, scale: ScaleFactors, difficulty: number): Weapon {
+  // Enemies lob arcing shells too. Their scatter is generous and charge time
+  // long, so a telegraphed landing marker gives the player time to dodge.
+  const acc = Math.min(0.95, tpl.accuracy + scale.accuracy);
+  const range = t === 'sniper' ? MAX_RANGE : t === 'heavy' ? 300 : t === 'standard' ? 280 : 240;
   return {
     type: 'longrange',
     name: `${t} cannon`,
     damage: Math.round(tpl.damage * difficulty),
     fireInterval: tpl.fireInterval,
-    baseAccuracy: Math.min(0.98, tpl.accuracy + scale.accuracy),
-    minAccuracy: tpl.minAccuracy,
-    maxRange: t === 'sniper' ? MAX_RANGE + 40 : MAX_RANGE,
-    splashRadius: 0,
-    splashDamage: 0,
-    cooldownRemaining: 0,
     reloadTime: tpl.fireInterval,
+    chargeTime: t === 'sniper' ? 1.4 : t === 'heavy' ? 1.2 : 0.9,
+    projectileSpeed: t === 'heavy' ? 190 : 240,
+    maxRange: range,
+    minRange: 24,
+    scatter: t === 'sniper' ? 16 : t === 'scout' ? 44 : 30,
+    splashRadius: t === 'heavy' ? 48 : 30,
+    splashDamage: Math.round(tpl.damage * 0.5 * difficulty),
+    baseAccuracy: acc,
+    minAccuracy: tpl.minAccuracy,
+    cooldownRemaining: 0,
     overheats: false,
     heat: 0,
     overheated: false,
@@ -84,6 +92,9 @@ function makeAI(): AIState {
     fireDelayTimer: 0,
     patrolTimer: 0,
     lastSeenPlayer: false,
+    charging: false,
+    chargeRemaining: 0,
+    chargeTarget: [0, 0],
   };
 }
 

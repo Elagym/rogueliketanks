@@ -17,14 +17,14 @@ import {
   SPAWN_INTERVAL_MIN,
   TANK_RADIUS,
   TILE_SIZE,
-  TURRET_CHASSIS_LIMIT,
+  VIEW_HEIGHT,
   WORLD_SIZE,
   ACCEL_TIME,
   DECEL_TIME,
 } from './constants';
 import { generateMap, isBlocked } from './mapgen';
 import { createEnemy, fireDelayFor, pickEnemyType } from './enemies';
-import { accuracyAt, buildPlayerWeapons } from './weapons';
+import { accuracyAt, buildPlayerWeapons, scatteredLanding } from './weapons';
 import { Rng, randomSeed } from './rng';
 import { createTankMesh, type TankMesh } from '../render/tankMesh';
 import { AudioManager } from './audio';
@@ -35,7 +35,6 @@ import {
   dist,
   normalize,
   rotateToward,
-  snap8,
   TAU,
 } from '../utils/math';
 import { findPath } from '../utils/pathfinding';
@@ -46,6 +45,7 @@ import type {
   Particle,
   Player,
   Settings,
+  Shell,
   Tank,
   UnlockedUpgrades,
   Vec2,
@@ -86,6 +86,8 @@ export class GameEngine {
   private particles: Particle[] = [];
   private tracers: Tracer[] = [];
   private floats: FloatText[] = [];
+  private shells: Shell[] = [];
+  private playerCharge: { remaining: number; total: number; target: Vec2 } | null = null;
 
   private meshes = new Map<string, TankMesh>();
   private wallMesh?: THREE.InstancedMesh;
@@ -110,7 +112,6 @@ export class GameEngine {
   // timers
   private spawnTimer = FIRST_SPAWN_DELAY;
   private shake = 0;
-  private overheatedAnnounced = false;
 
   // loop
   private rafId = 0;
@@ -276,13 +277,14 @@ export class GameEngine {
     this.particles = [];
     this.tracers = [];
     this.floats = [];
+    this.shells = [];
+    this.playerCharge = null;
     this.score = 0;
     this.kills = 0;
     this.damageDealt = 0;
     this.distance = 0;
     this.spawnTimer = FIRST_SPAWN_DELAY;
     this.shake = 0;
-    this.overheatedAnnounced = false;
 
     // Player setup with unlocks applied.
     let maxHp = PLAYER_MAX_HP;
@@ -428,8 +430,8 @@ export class GameEngine {
     this.overlay.style.height = `${h}px`;
     this.octx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // Orthographic frustum: show ~180px tall region.
-    const viewHeight = 170;
+    // Orthographic frustum: zoomed-out tactical view.
+    const viewHeight = VIEW_HEIGHT;
     const aspect = w / h;
     const viewWidth = viewHeight * aspect;
     this.camera.left = -viewWidth / 2;
@@ -463,6 +465,7 @@ export class GameEngine {
   private update(dt: number): void {
     this.updatePlayer(dt);
     this.updateEnemies(dt);
+    this.updateShells(dt);
     this.updateSpawning(dt);
     this.updateParticles(dt);
     this.updateExploration();
@@ -481,10 +484,10 @@ export class GameEngine {
     // Desired movement vector from WASD (screen-aligned; +x right, +y down).
     let dx = 0;
     let dy = 0;
-    if (this.keys.has('w')) dy -= 1;
-    if (this.keys.has('s')) dy += 1;
-    if (this.keys.has('a')) dx -= 1;
-    if (this.keys.has('d')) dx += 1;
+    if (this.keys.has('w') || this.keys.has('arrowup')) dy -= 1;
+    if (this.keys.has('s') || this.keys.has('arrowdown')) dy += 1;
+    if (this.keys.has('a') || this.keys.has('arrowleft')) dx -= 1;
+    if (this.keys.has('d') || this.keys.has('arrowright')) dx += 1;
     const moving = dx !== 0 || dy !== 0;
     const targetVel: Vec2 = [0, 0];
     if (moving) {
@@ -492,147 +495,139 @@ export class GameEngine {
       targetVel[0] = n[0] * p.speed;
       targetVel[1] = n[1] * p.speed;
     }
-    // Momentum: accelerate / decelerate toward target velocity.
-    const rate = moving ? dt / ACCEL_TIME : dt / DECEL_TIME;
-    p.velocity[0] += (targetVel[0] - p.velocity[0]) * Math.min(1, rate * 3);
-    p.velocity[1] += (targetVel[1] - p.velocity[1]) * Math.min(1, rate * 3);
+    // Momentum: linear acceleration toward the target velocity (crisp, frame-rate
+    // independent). Reaches top speed in ACCEL_TIME, stops in DECEL_TIME.
+    const accel = (moving ? p.speed / ACCEL_TIME : p.speed / DECEL_TIME) * dt;
+    for (let i = 0; i < 2; i++) {
+      const diff = targetVel[i] - p.velocity[i];
+      if (Math.abs(diff) <= accel) p.velocity[i] = targetVel[i];
+      else p.velocity[i] += Math.sign(diff) * accel;
+    }
 
     const moved = this.moveWithCollision(p, dt);
     this.distance += moved;
 
-    // Body rotates toward movement direction (8-dir snap).
+    // Body rotates smoothly toward movement direction (no snapping).
     const speed2 = p.velocity[0] ** 2 + p.velocity[1] ** 2;
-    if (speed2 > 25) {
-      const targetAngle = snap8(Math.atan2(p.velocity[1], p.velocity[0]));
-      p.angle = rotateToward(p.angle, targetAngle, dt * 8);
+    if (speed2 > 16) {
+      const targetAngle = Math.atan2(p.velocity[1], p.velocity[0]);
+      p.angle = rotateToward(p.angle, targetAngle, dt * 6);
     }
 
-    // Turret aims at cursor, clamped to ±120° of body.
+    // Turret tracks the cursor freely and quickly (aiming accuracy comes from
+    // the reticle/landing, not the turret angle).
     this.cursorWorld = this.screenToGround(this.mouseScreen);
-    let desiredTurret = angleTo(p.position, this.cursorWorld);
-    const rel = angleDiff(desiredTurret, p.angle);
-    if (rel > TURRET_CHASSIS_LIMIT) desiredTurret = p.angle + TURRET_CHASSIS_LIMIT;
-    else if (rel < -TURRET_CHASSIS_LIMIT) desiredTurret = p.angle - TURRET_CHASSIS_LIMIT;
-    p.turretAngle = rotateToward(p.turretAngle, desiredTurret, dt * 12);
+    const aimAt = this.playerCharge ? this.playerCharge.target : this.cursorWorld;
+    p.turretAngle = rotateToward(p.turretAngle, angleTo(p.position, aimAt), dt * 11);
 
-    // Weapon cooldown + heat.
+    // Reload countdown.
     const w = p.weapon;
     if (w.cooldownRemaining > 0) w.cooldownRemaining = Math.max(0, w.cooldownRemaining - dt);
-    if (w.overheats) {
-      if (w.overheated) {
-        w.heat = Math.max(0, w.heat - dt / 2); // 2s cooldown to clear
-        if (w.heat <= 0) {
-          w.overheated = false;
-          this.overheatedAnnounced = false;
-        }
-      } else {
-        w.heat = Math.max(0, w.heat - dt * 0.4); // passive cool
-      }
-    }
 
     if (p.hitFlash > 0) p.hitFlash = Math.max(0, p.hitFlash - dt * 3);
 
-    // Fire.
-    if (this.mouseDown) this.tryPlayerFire();
+    // Charge / fire sequence.
+    if (this.playerCharge) {
+      this.playerCharge.remaining -= dt;
+      if (this.playerCharge.remaining <= 0) {
+        this.launchPlayerShell(this.playerCharge.target);
+        this.playerCharge = null;
+      }
+    } else if (this.mouseDown && w.cooldownRemaining <= 0) {
+      this.beginPlayerFire();
+    }
   }
 
-  private tryPlayerFire(): void {
+  /** Begin the wind-up: lock the aim point (clamped to weapon range). */
+  private beginPlayerFire(): void {
     const p = this.player;
     const w = p.weapon;
-    if (w.cooldownRemaining > 0 || w.overheated) return;
+    const target = this.clampToRange(p.position, this.cursorWorld, w);
+    this.playerCharge = { remaining: w.chargeTime, total: w.chargeTime, target };
+    this.audio.play('click');
+  }
 
+  private launchPlayerShell(target: Vec2): void {
+    const p = this.player;
+    const w = p.weapon;
     const origin = this.barrelTip(p);
-    const angle = p.turretAngle;
-    this.fireShot(origin, angle, w, true);
+    this.launchShell(origin, target, w, true);
     w.cooldownRemaining = w.fireInterval;
-
-    // Heat handling for rapid.
-    if (w.overheats) {
-      w.heat += 1 / 8; // 8 shots => full
-      if (w.heat >= 1) {
-        w.overheated = true;
-        w.heat = 1;
-        if (!this.overheatedAnnounced) {
-          this.audio.play('overheat');
-          this.overheatedAnnounced = true;
-          this.addFloat(p.position, 'OVERHEAT', '#ff5050');
-        }
-      }
-    }
-
+    this.spawnParticles(origin, 'flash', 6, '#ffd060');
     if (w.type === 'rapid') this.audio.play('shoot_rapid');
     else if (w.type === 'longrange') this.audio.play('shoot_long');
     else this.audio.play('shoot_explosive');
-    this.shake = Math.max(this.shake, w.type === 'explosive' ? 0.6 : w.type === 'longrange' ? 0.4 : 0.2);
+    this.shake = Math.max(this.shake, w.type === 'explosive' ? 0.5 : 0.3);
   }
 
-  /** Resolve an instant-hit shot. fromPlayer toggles which side takes damage. */
-  private fireShot(origin: Vec2, angle: number, weapon: Weapon, fromPlayer: boolean): void {
-    const dir: Vec2 = [Math.cos(angle), Math.sin(angle)];
-    const targets = fromPlayer ? this.enemies : [this.player];
-
-    // Find first target along the ray within corridor + maxRange.
-    let best: Tank | null = null;
-    let bestT = Infinity;
-    const wallT = this.rayWallDistance(origin, dir, weapon.maxRange);
-    for (const t of targets) {
-      const rel: Vec2 = [t.position[0] - origin[0], t.position[1] - origin[1]];
-      const proj = rel[0] * dir[0] + rel[1] * dir[1];
-      if (proj <= 0 || proj > weapon.maxRange || proj > wallT) continue;
-      const perp = Math.abs(rel[0] * -dir[1] + rel[1] * dir[0]);
-      if (perp <= t.radius + 3 && proj < bestT) {
-        bestT = proj;
-        best = t;
-      }
-    }
-
-    const impactDist = Math.min(best ? bestT : weapon.maxRange, wallT);
-    const impact: Vec2 = [origin[0] + dir[0] * impactDist, origin[1] + dir[1] * impactDist];
-
-    if (weapon.splashRadius > 0) {
-      // Explosive: detonate at impact, splash regardless of direct hit roll.
-      this.tracers.push({ a: origin, b: impact, life: 0.08, color: fromPlayer ? '#ffd060' : '#ff80ff', width: 2 });
-      this.explodeAt(impact, weapon, fromPlayer);
-      return;
-    }
-
-    // Ballistic weapons: roll accuracy if a target is in the corridor.
-    const color = fromPlayer ? '#ffe070' : '#ff6060';
-    if (best) {
-      const acc = accuracyAt(weapon, bestT);
-      const hit = this.rng.next() <= acc;
-      if (hit) {
-        this.tracers.push({ a: origin, b: best.position, life: 0.07, color, width: fromPlayer ? 1.5 : 1.5 });
-        this.applyDamage(best, weapon.damage, fromPlayer);
-        this.audio.play('hit');
-        this.spawnParticles(best.position, 'spark', 8, color);
-      } else {
-        // Miss: tracer flies past, dust near target.
-        const missEnd: Vec2 = [origin[0] + dir[0] * impactDist, origin[1] + dir[1] * impactDist];
-        this.tracers.push({ a: origin, b: missEnd, life: 0.07, color, width: 1 });
-        this.spawnParticles(best.position, 'dust', 4, '#cccccc');
-        this.audio.play('miss');
-      }
-    } else {
-      this.tracers.push({ a: origin, b: impact, life: 0.07, color, width: 1 });
-      if (impactDist >= wallT) this.spawnParticles(impact, 'dust', 3, '#aaaaaa');
-    }
+  /** Clamp an aim point so it lies within [minRange, maxRange] of origin. */
+  private clampToRange(origin: Vec2, target: Vec2, w: Weapon): Vec2 {
+    const dir: Vec2 = [target[0] - origin[0], target[1] - origin[1]];
+    const d = Math.hypot(dir[0], dir[1]);
+    if (d < 0.001) return [origin[0] + w.minRange, origin[1]];
+    const clamped = clamp(d, w.minRange, w.maxRange);
+    return [origin[0] + (dir[0] / d) * clamped, origin[1] + (dir[1] / d) * clamped];
   }
 
-  private explodeAt(center: Vec2, weapon: Weapon, fromPlayer: boolean): void {
-    this.spawnParticles(center, 'flash', 14, '#ffcf60');
-    this.spawnParticles(center, 'smoke', 8, '#555555');
+  /** Launch a lobbed shell that arcs to a (scattered) ground impact point. */
+  private launchShell(origin: Vec2, target: Vec2, weapon: Weapon, fromPlayer: boolean): void {
+    const landing = scatteredLanding(weapon, origin, target, this.rng);
+    const d = Math.max(8, dist(origin, landing));
+    const duration = d / weapon.projectileSpeed;
+    this.shells.push({
+      start: [origin[0], origin[1]],
+      target: landing,
+      position: [origin[0], origin[1]],
+      t: 0,
+      duration,
+      arcHeight: clamp(d * 0.4, 24, 120),
+      damage: weapon.damage,
+      splashRadius: weapon.splashRadius,
+      splashDamage: weapon.splashDamage,
+      fromPlayer,
+      color: fromPlayer ? '#ffe070' : '#ff7a55',
+    });
+  }
+
+  private updateShells(dt: number): void {
+    for (const s of this.shells) {
+      s.t += dt / s.duration;
+      const tt = Math.min(1, s.t);
+      s.position[0] = s.start[0] + (s.target[0] - s.start[0]) * tt;
+      s.position[1] = s.start[1] + (s.target[1] - s.start[1]) * tt;
+      if (s.t >= 1) this.detonateShell(s);
+    }
+    this.shells = this.shells.filter((s) => s.t < 1);
+  }
+
+  private detonateShell(s: Shell): void {
+    this.explodeAtPoint(s.target, s.damage, s.splashRadius, s.splashDamage, s.fromPlayer);
+  }
+
+  private explodeAtPoint(
+    center: Vec2,
+    damage: number,
+    splashRadius: number,
+    splashDamage: number,
+    fromPlayer: boolean,
+  ): void {
+    const big = splashRadius > 45;
+    this.spawnParticles(center, 'flash', big ? 20 : 12, '#ffcf60');
+    this.spawnParticles(center, 'smoke', big ? 12 : 7, '#555555');
+    this.addFloat(center, 'BOOM', fromPlayer ? '#ffd060' : '#ff8060');
     this.audio.play('explosion');
-    this.shake = Math.max(this.shake, 0.7);
+    // Camera shake scales with proximity to the player.
+    const pd = dist(center, this.player.position);
+    if (pd < splashRadius + 120) this.shake = Math.max(this.shake, big ? 0.7 : 0.45);
+
     const victims = fromPlayer ? this.enemies : [this.player];
     for (const t of victims) {
       const d = dist(center, t.position);
-      if (d <= 4) {
-        // direct-ish hit
-        this.applyDamage(t, weapon.damage, fromPlayer);
-      } else if (d <= weapon.splashRadius) {
-        const falloff = 1 - d / weapon.splashRadius;
-        this.applyDamage(t, Math.round(weapon.splashDamage * falloff), fromPlayer);
+      if (d <= t.radius + 2) {
+        this.applyDamage(t, damage, fromPlayer); // direct hit
+      } else if (d <= splashRadius) {
+        const falloff = 1 - d / splashRadius;
+        this.applyDamage(t, Math.round(splashDamage * falloff), fromPlayer);
       }
     }
   }
@@ -696,13 +691,21 @@ export class GameEngine {
       if (ai.pathTimer <= 0) {
         ai.pathTimer = 0.5;
         if (ai.mode === 'engage') {
-          // Snipers keep their distance.
-          if (e.type === 'sniper' && d < 130) {
-            const away: Vec2 = [e.position[0] - p.position[0], e.position[1] - p.position[1]];
-            const n = normalize(away);
-            ai.target = [e.position[0] + n[0] * 60, e.position[1] + n[1] * 60];
+          // Maintain a type-specific standoff range (artillery duel). Heavies
+          // close in; others kite / strafe to stay a moving target.
+          const preferred = e.type === 'sniper' ? 240 : e.type === 'heavy' ? 80 : 165;
+          const toPlayer: Vec2 = normalize([p.position[0] - e.position[0], p.position[1] - e.position[1]]);
+          if (e.type === 'heavy' || d > preferred + 40) {
+            ai.target = [p.position[0], p.position[1]]; // close in
+          } else if (d < preferred - 40) {
+            ai.target = [e.position[0] - toPlayer[0] * 80, e.position[1] - toPlayer[1] * 80]; // back off
           } else {
-            ai.target = [p.position[0], p.position[1]];
+            // Strafe perpendicular to keep moving.
+            const side = this.rng.bool() ? 1 : -1;
+            ai.target = [
+              e.position[0] + -toPlayer[1] * 70 * side,
+              e.position[1] + toPlayer[0] * 70 * side,
+            ];
           }
           ai.path = findPath(this.map, e.position, ai.target);
         } else if (ai.mode === 'idle') {
@@ -748,16 +751,32 @@ export class GameEngine {
       const aimAngle = ai.mode === 'engage' ? angleTo(e.position, p.position) : e.angle;
       e.turretAngle = rotateToward(e.turretAngle, aimAngle, dt * 6);
 
-      // Combat.
+      // Combat: artillery wind-up, then lob a shell at the player's position
+      // (telegraphed by a landing marker, so the player can dodge).
       if (e.weapon.cooldownRemaining > 0) e.weapon.cooldownRemaining -= dt;
       if (e.hitFlash > 0) e.hitFlash = Math.max(0, e.hitFlash - dt * 3);
-      if (ai.mode === 'engage' && d < ENEMY_ENGAGE_RANGE && canSee) {
-        ai.fireDelayTimer -= dt;
-        const aligned = Math.abs(angleDiff(e.turretAngle, angleTo(e.position, p.position))) < 0.2;
-        if (ai.fireDelayTimer <= 0 && e.weapon.cooldownRemaining <= 0 && aligned) {
-          this.fireShot(this.barrelTip(e), e.turretAngle, e.weapon, false);
+
+      if (ai.charging) {
+        ai.chargeRemaining -= dt;
+        e.turretAngle = rotateToward(e.turretAngle, angleTo(e.position, ai.chargeTarget), dt * 6);
+        if (ai.chargeRemaining <= 0) {
+          this.launchShell(this.barrelTip(e), ai.chargeTarget, e.weapon, false);
           e.weapon.cooldownRemaining = e.weapon.fireInterval;
           this.audio.play('enemy_shot');
+          ai.charging = false;
+        }
+      } else if (
+        ai.mode === 'engage' &&
+        canSee &&
+        d < e.weapon.maxRange &&
+        d > e.weapon.minRange
+      ) {
+        ai.fireDelayTimer -= dt;
+        const aligned = Math.abs(angleDiff(e.turretAngle, angleTo(e.position, p.position))) < 0.35;
+        if (ai.fireDelayTimer <= 0 && e.weapon.cooldownRemaining <= 0 && aligned) {
+          ai.charging = true;
+          ai.chargeRemaining = e.weapon.chargeTime;
+          ai.chargeTarget = [p.position[0], p.position[1]];
         }
       }
     }
@@ -974,6 +993,8 @@ export class GameEngine {
   private syncMesh(tank: Tank): void {
     const m = this.getMesh(tank);
     m.group.position.set(tank.position[0], 0, tank.position[1]);
+    // Scale tanks up a touch so they read clearly at the zoomed-out view.
+    m.group.scale.setScalar(1.45);
     m.group.rotation.y = -tank.angle;
     m.turret.rotation.y = tank.angle - tank.turretAngle;
     m.setHitFlash(tank.hitFlash * 0.8);
@@ -1026,25 +1047,138 @@ export class GameEngine {
     ctx.globalAlpha = 1;
     ctx.textAlign = 'left';
 
-    // Turret aim indicator line (player) + range ring.
     const p = this.player;
     const o = this.worldToScreen(p.position[0], p.position[1], 7);
-    const tip = this.worldToScreen(
-      p.position[0] + Math.cos(p.turretAngle) * 40,
-      p.position[1] + Math.sin(p.turretAngle) * 40,
-      7,
-    );
-    ctx.strokeStyle = 'rgba(0,255,0,0.35)';
+
+    this.renderMarkersAndShells();
+    this.renderReticle();
+
+    // Fog of war: darken the area outside the vision radius.
+    this.renderFog(o);
+  }
+
+  /** Approximate a world circle on screen (radius scaled by camera zoom). */
+  private groundRing(world: Vec2, worldRadius: number): { c: Vec2; r: number } {
+    const c = this.worldToScreen(world[0], world[1], 0);
+    return { c, r: Math.max(2, worldRadius * this.screenScale()) };
+  }
+
+  private renderMarkersAndShells(): void {
+    const ctx = this.octx;
+    const t = performance.now() / 1000;
+
+    // Telegraphed landing markers for every shell in flight (so the player can
+    // read incoming fire and dodge).
+    for (const s of this.shells) {
+      const { c, r } = this.groundRing(s.target, s.splashRadius);
+      const urgency = clamp(s.t, 0, 1);
+      const pulse = 0.5 + 0.5 * Math.sin(t * 12 + s.start[0]);
+      ctx.strokeStyle = s.fromPlayer
+        ? `rgba(255,224,112,${0.4 + 0.4 * urgency})`
+        : `rgba(255,70,50,${0.4 + 0.5 * urgency})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(c[0], c[1], r, 0, TAU);
+      ctx.stroke();
+      // Shrinking inner ring shows time-to-impact.
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.arc(c[0], c[1], r * (1 - urgency) + 3 * pulse, 0, TAU);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Enemy wind-up markers (charge target) — early warning before launch.
+    for (const e of this.enemies) {
+      if (!e.ai?.charging) continue;
+      const { c, r } = this.groundRing(e.ai.chargeTarget, e.weapon.splashRadius);
+      const prog = 1 - clamp(e.ai.chargeRemaining / Math.max(0.01, e.weapon.chargeTime), 0, 1);
+      ctx.strokeStyle = `rgba(255,90,60,${0.25 + 0.4 * prog})`;
+      ctx.setLineDash([5, 5]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(c[0], c[1], r, 0, TAU);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Shells: arcing projectile + ground shadow.
+    for (const s of this.shells) {
+      const tt = clamp(s.t, 0, 1);
+      const height = s.arcHeight * 4 * tt * (1 - tt) + 6;
+      const shadow = this.worldToScreen(s.position[0], s.position[1], 0);
+      const air = this.worldToScreen(s.position[0], s.position[1], height);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath();
+      ctx.arc(shadow[0], shadow[1], 3, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      ctx.arc(air[0], air[1], 3.5, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(shadow[0], shadow[1]);
+      ctx.lineTo(air[0], air[1]);
+      ctx.stroke();
+    }
+  }
+
+  /** Player aiming reticle: shows where the next shell will land + range ring. */
+  private renderReticle(): void {
+    const ctx = this.octx;
+    const p = this.player;
+    const w = p.weapon;
+    const aim = this.playerCharge ? this.playerCharge.target : this.clampToRange(p.position, this.cursorWorld, w);
+
+    // Max-range ring around the player (faint).
+    const range = this.groundRing(p.position, w.maxRange);
+    ctx.strokeStyle = 'rgba(0,255,0,0.10)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(range.c[0], range.c[1], range.r, 0, TAU);
+    ctx.stroke();
+
+    // Splash preview at the aim point.
+    const ready = w.cooldownRemaining <= 0;
+    const charging = !!this.playerCharge;
+    const { c, r } = this.groundRing(aim, w.splashRadius);
+    const col = charging ? '#ffd060' : ready ? '#00ff66' : 'rgba(160,160,160,0.7)';
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(c[0], c[1], r, 0, TAU);
+    ctx.stroke();
+
+    // Crosshair.
+    ctx.beginPath();
+    ctx.moveTo(c[0] - 8, c[1]);
+    ctx.lineTo(c[0] + 8, c[1]);
+    ctx.moveTo(c[0], c[1] - 8);
+    ctx.lineTo(c[0], c[1] + 8);
+    ctx.stroke();
+
+    // Charge progress arc around the reticle.
+    if (this.playerCharge) {
+      const prog = 1 - clamp(this.playerCharge.remaining / Math.max(0.01, this.playerCharge.total), 0, 1);
+      ctx.strokeStyle = '#ffd060';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(c[0], c[1], r + 5, -Math.PI / 2, -Math.PI / 2 + prog * TAU);
+      ctx.stroke();
+    }
+
+    // Faint barrel line from tank to aim point.
+    const o = this.worldToScreen(p.position[0], p.position[1], 7);
+    ctx.strokeStyle = 'rgba(0,255,0,0.18)';
     ctx.setLineDash([4, 4]);
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(o[0], o[1]);
-    ctx.lineTo(tip[0], tip[1]);
+    ctx.lineTo(c[0], c[1]);
     ctx.stroke();
     ctx.setLineDash([]);
-
-    // Fog of war: darken the area outside the vision radius.
-    this.renderFog(o);
   }
 
   private screenScale(): number {
@@ -1087,6 +1221,7 @@ export class GameEngine {
     }
     const w = p.weapon;
     const acc = nearest !== null ? accuracyAt(w, nearest) : null;
+    const aimDistance = dist(p.position, this.cursorWorld);
     const enemyTiles: Vec2[] = this.enemies
       .filter((e) => dist(e.position, p.position) <= p.visionRange + 10)
       .map((e) => [Math.floor(e.position[0] / TILE_SIZE), Math.floor(e.position[1] / TILE_SIZE)]);
@@ -1107,6 +1242,14 @@ export class GameEngine {
       })),
       nearestEnemyDist: nearest,
       currentAccuracy: acc,
+      charging: !!this.playerCharge,
+      chargeProgress: this.playerCharge
+        ? 1 - clamp(this.playerCharge.remaining / Math.max(0.01, this.playerCharge.total), 0, 1)
+        : 0,
+      weaponRange: w.maxRange,
+      weaponMinRange: w.minRange,
+      aimDistance,
+      aimInRange: aimDistance >= w.minRange && aimDistance <= w.maxRange,
       difficultyMultiplier: this.difficultyMult * (1 + Math.floor(this.kills / 3) * 0.05),
       seed: this.seed,
       fps: this.fps,

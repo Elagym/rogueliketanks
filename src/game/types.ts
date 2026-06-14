@@ -12,24 +12,43 @@ export type Difficulty = 'easy' | 'normal' | 'hard';
 
 export type TileType = 0 | 1 | 2; // 0 = grass (walkable), 1 = water, 2 = wall
 
-/** Runtime weapon instance with live cooldown / heat state. */
+/** Runtime weapon instance with live reload + ballistics state. */
 export interface Weapon {
   type: WeaponType;
   name: string;
-  damage: number;
-  /** Seconds between shots. */
+  damage: number; // direct-hit damage at impact center
+  /** Seconds between shots (reload after a shell lands / launches). */
   fireInterval: number;
-  baseAccuracy: number; // 0..1 at point blank
-  minAccuracy: number; // 0..1 at max range
-  maxRange: number;
-  splashRadius: number; // 0 for non-explosive
-  splashDamage: number;
-  cooldownRemaining: number; // seconds until next shot allowed
-  reloadTime: number; // visible reload duration (for UI)
-  // Heat (rapid only)
+  baseAccuracy: number; // 0..1; higher => tighter shell scatter
+  minAccuracy: number; // retained for compatibility / scaling
+  maxRange: number; // max ground distance the shell can be lobbed (px)
+  minRange: number; // arc weapons can't hit point-blank
+  splashRadius: number; // explosion radius (px)
+  splashDamage: number; // edge-of-splash damage
+  cooldownRemaining: number; // reload timer (seconds until next shot allowed)
+  reloadTime: number; // total reload duration (for UI)
+  chargeTime: number; // wind-up before the shell launches (seconds)
+  projectileSpeed: number; // px/s ground speed of the lobbed shell
+  scatter: number; // max landing error (px) at max range before accuracy
+  // legacy heat fields (artillery weapons never overheat)
   overheats: boolean;
-  heat: number; // 0..1
+  heat: number;
   overheated: boolean;
+}
+
+/** A lobbed shell traveling in an arc toward a ground impact point. */
+export interface Shell {
+  start: Vec2;
+  target: Vec2; // where it will land (already scattered)
+  position: Vec2; // current ground position
+  t: number; // 0..1 travel progress
+  duration: number; // total travel time (seconds)
+  arcHeight: number; // peak visual height of the lob
+  damage: number;
+  splashRadius: number;
+  splashDamage: number;
+  fromPlayer: boolean;
+  color: string;
 }
 
 export interface AIState {
@@ -42,6 +61,10 @@ export interface AIState {
   fireDelayTimer: number; // type-specific delay before first shot in an engagement
   patrolTimer: number;
   lastSeenPlayer: boolean;
+  // Artillery wind-up: when > 0 the tank is aiming/charging a shell.
+  charging: boolean;
+  chargeRemaining: number;
+  chargeTarget: Vec2;
 }
 
 export interface Tank {
@@ -141,6 +164,13 @@ export interface HudSnapshot {
   }[];
   nearestEnemyDist: number | null;
   currentAccuracy: number | null;
+  // Artillery aiming feedback
+  charging: boolean;
+  chargeProgress: number; // 0..1 wind-up progress (only when charging)
+  weaponRange: number;
+  weaponMinRange: number;
+  aimDistance: number; // ground distance from player to cursor
+  aimInRange: boolean;
   difficultyMultiplier: number;
   seed: number;
   fps: number;
