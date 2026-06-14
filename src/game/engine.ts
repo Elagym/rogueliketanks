@@ -514,11 +514,12 @@ export class GameEngine {
       p.angle = rotateToward(p.angle, targetAngle, dt * 6);
     }
 
-    // Turret tracks the cursor freely and quickly (aiming accuracy comes from
-    // the reticle/landing, not the turret angle).
+    // Cannon points exactly at the reticle (instant, no lag) so it always looks
+    // like the tank is firing the shell toward the crosshair. While charging the
+    // aim is locked to the captured target.
     this.cursorWorld = this.screenToGround(this.mouseScreen);
     const aimAt = this.playerCharge ? this.playerCharge.target : this.cursorWorld;
-    p.turretAngle = rotateToward(p.turretAngle, angleTo(p.position, aimAt), dt * 11);
+    p.turretAngle = angleTo(p.position, aimAt);
 
     // Reload countdown.
     const w = p.weapon;
@@ -974,13 +975,17 @@ export class GameEngine {
     const p = this.player;
     if (!p) return;
 
-    // Camera follow with isometric offset + screen shake.
-    const shx = (this.rng ? (Math.random() - 0.5) : 0) * this.shake * 8;
-    const shz = (Math.random() - 0.5) * this.shake * 8;
-    const targetX = p.position[0] + shx;
-    const targetZ = p.position[1] + shz;
-    this.camera.position.set(targetX + 90, 170, targetZ + 150);
-    this.camera.lookAt(targetX, 0, targetZ);
+    // Camera is hard-locked to the player so the tank is permanently dead-center.
+    // Screen shake is a subtle camera *roll* around the view axis — this keeps the
+    // tank centered (a positional shake would slide it off-center).
+    const cx = p.position[0];
+    const cz = p.position[1];
+    this.camera.position.set(cx + 90, 170, cz + 150);
+    this.camera.up.set(0, 1, 0);
+    this.camera.lookAt(cx, 6, cz);
+    if (this.shake > 0.001) {
+      this.camera.rotateZ((Math.random() - 0.5) * this.shake * 0.06);
+    }
 
     // Sync tank meshes.
     this.syncMesh(p);
